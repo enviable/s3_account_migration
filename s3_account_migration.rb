@@ -36,6 +36,14 @@ class S3AccountMigration < Thor
 
   end
 
+  desc 'migrate_all_buckets SOURCE_PROFILE DESTINATION_PROFILE', 'migrates all the buckets from source to destination and appends the suffix defined in .env'
+  def migrate_all_buckets(source_profile, destination_profile)
+    s3_client(profile: source_profile).list_buckets.buckets.map(&:name).each do |source_bucket|
+      migrate_bucket(source_bucket, source_profile, destination_profile)
+    end
+  end
+
+
   desc 'migrate_bucket BUCKET SOURCE_PROFILE DESTINATION_PROFILE', 'migrates bucket from source to destination'
   def migrate_bucket(source_bucket, source_profile, destination_profile)
     raise Exception.new("DESTINATION_ROOT_ID missing from env") if ENV['DESTINATION_ROOT_ID'].nil?
@@ -72,6 +80,7 @@ class S3AccountMigration < Thor
     end
 
     puts "run `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{destination_profile}` to sync the data between buckets"
+    # `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{destination_profile}`
   end
 
   no_commands do
@@ -147,8 +156,8 @@ class S3AccountMigration < Thor
           routing_rules: source_data.routing_rules.map do |rule|
             {
               condition: {
-                http_error_code_returned_equals: rule&.http_error_code_returned_equals,
-                key_prefix_equals: rule&.key_prefix_equals,
+                http_error_code_returned_equals: rule&.condition&.http_error_code_returned_equals,
+                key_prefix_equals: rule&.condition&.key_prefix_equals,
               },
               redirect: { # required
                 host_name: rule&.redirect&.host_name,
@@ -157,7 +166,7 @@ class S3AccountMigration < Thor
                 replace_key_prefix_with: rule&.redirect&.replace_key_prefix_with,
                 replace_key_with: rule&.redirect&.replace_key_with,
               },
-            }
+            }.compact(recurse: true, delete_empty: true)
           end,
         }
       }.compact(recurse: true, delete_empty: true)
