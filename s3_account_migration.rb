@@ -1,9 +1,10 @@
 require 'aws-sdk'
+require 'byebug'
 require 'dotenv'
 require 'json'
 require 'memoist'
+require 'open3'
 require 'thor'
-require 'byebug'
 Dotenv.load
 
 class S3AccountMigration < Thor
@@ -24,16 +25,37 @@ class S3AccountMigration < Thor
     puts get_bucket_website(bucket: bucket, profile: profile)
   end
 
-  desc 'rename_bucket BUCKET PROFILE', 'rename bucket on same account'
-  def rename_bucket(bucket, profile)
+  desc 'rename_bucket BUCKET PROFILE SYNC=false', 'rename bucket on same account'
+  def rename_bucket(bucket, profile, sync=false)
     source_bucket = bucket + ENV['SOURCE_BUCKET_SUFFIX']
     destination_bucket = bucket
 
     source_policy = get_bucket_policy(bucket: source_bucket, profile: profile)
 
     create_bucket(bucket: destination_bucket, profile: profile)
-    # copy_policy(source_bucket: source_bucket, destination_bucket: destination_bucket, profile: profile)
+    begin
+      copy_policy(source_bucket: source_bucket, destination_bucket: destination_bucket, profile: profile)
 
+      source_website = get_bucket_website(bucket: source_bucket, profile: profile)
+
+      if source_website.nil?
+        puts "No website settings to transfer"
+      else
+        puts "Writing website settings to #{destination_bucket}"
+        destination_website = website_put_from_response(destination_bucket: destination_bucket, source_data: source_website)
+        puts destination_website
+        s3_client(profile: profile).put_bucket_website(destination_website)
+      end
+
+      if sync
+        puts "running `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{profile}` to sync the data between buckets"
+        `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{profile}`
+      else
+        puts "run `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{profile}` to sync the data between buckets"
+      end
+    rescue Aws::S3::Errors::NoSuchBucket => e
+      puts "Bucket does not exist"
+    end
   end
 
   desc 'migrate_all_buckets SOURCE_PROFILE DESTINATION_PROFILE', 'migrates all the buckets from source to destination and appends the suffix defined in .env'
@@ -43,9 +65,8 @@ class S3AccountMigration < Thor
     end
   end
 
-
-  desc 'migrate_bucket BUCKET SOURCE_PROFILE DESTINATION_PROFILE', 'migrates bucket from source to destination'
-  def migrate_bucket(source_bucket, source_profile, destination_profile)
+  desc 'migrate_bucket BUCKET SOURCE_PROFILE DESTINATION_PROFILE SYNC=false', 'migrates bucket from source to destination'
+  def migrate_bucket(source_bucket, source_profile, destination_profile, sync=false)
     raise Exception.new("DESTINATION_ROOT_ID missing from env") if ENV['DESTINATION_ROOT_ID'].nil?
     destination_bucket = source_bucket + ENV['DESTINATION_BUCKET_SUFFIX']
 
@@ -79,8 +100,12 @@ class S3AccountMigration < Thor
       s3_client(profile: destination_profile).put_bucket_website(destination_website)
     end
 
-    puts "run `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{destination_profile}` to sync the data between buckets"
-    # `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{destination_profile}`
+    if sync
+      puts "running `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{destination_profile}` to sync the data between buckets"
+      `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{destination_profile}`
+    else
+      puts "run `aws s3 sync s3://#{source_bucket} s3://#{destination_bucket} --profile #{destination_profile}` to sync the data between buckets"
+    end
   end
 
   no_commands do
@@ -109,8 +134,8 @@ class S3AccountMigration < Thor
 
     def copy_policy(source_bucket:, destination_bucket:, profile:, same_account: true)
       source_policy = get_bucket_policy(bucket: source_bucket, profile: profile)
-
-
+      destination_policy = change_bucket_name(policy: JSON.parse(source_policy), source_bucket: source_bucket, destination_bucket: destination_bucket)
+      put_bucket_policy(bucket: destination_bucket, policy: destination_policy, profile: profile)
     end
 
     def put_bucket_policy(bucket:, policy:, profile:)
@@ -118,7 +143,11 @@ class S3AccountMigration < Thor
         puts "Policy was nil. Nothing to write to #{bucket}"
       else
         puts "Writing policy to #{bucket}"
-        s3_client(profile: profile).put_bucket_policy(bucket: bucket, policy: policy.to_json)
+        begin
+          s3_client(profile: profile).put_bucket_policy(bucket: bucket, policy: policy.to_json)
+        rescue Aws::S3::Errors::NoSuchBucket => e
+          puts "Bucket does not exists"
+        end
       end
     end
 
